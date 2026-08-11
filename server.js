@@ -7,7 +7,7 @@ app.use(express.json());
 
 const deviceMemory = {};
 
-// This tells the server to look for a secure variable provided by the cloud host
+// Using the Render environment variable for security
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 app.post('/ping', (req, res) => {
@@ -19,17 +19,50 @@ app.post('/ping', (req, res) => {
 
     console.log(`[${new Date().toLocaleTimeString()}] Heartbeat from: ${instance_id}`);
 
+    // Update the ledger with fresh data and reset the alarm lock
     deviceMemory[instance_id] = {
         chatId: chat_id,
-        // Kept as seconds for this final local test
         timeoutLimit: parseInt(timeout_limit), 
-        shift: shift,
+        shift: parseInt(shift),
         lastSeen: Date.now(),
-        alertSent: false 
+        alertSent: false // Automatically resets so it can fail/alert again later
     };
 
     res.status(200).send("Heartbeat logged successfully");
 });
+
+// --- SHIFT CHECKING LOGIC ---
+function isCurrentlyInShift(shiftNumber) {
+    // 1. Get current time in Latvia (Europe/Riga), handling DST automatically
+    const options = {
+        timeZone: 'Europe/Riga',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false // Force 24-hour format
+    };
+    
+    // Returns format "HH:MM" based on current Latvian time
+    const latviaTimeStr = new Date().toLocaleTimeString('en-GB', options); 
+    const [hourStr, minStr] = latviaTimeStr.split(':');
+    
+    // Convert current time to total minutes from midnight for easy math
+    const latviaMinutes = (parseInt(hourStr, 10) * 60) + parseInt(minStr, 10);
+    const shift = parseInt(shiftNumber, 10);
+    
+    if (shift === 1) {
+        // 1st shift: 08:00 (480 mins) to 15:50 (950 mins)
+        return latviaMinutes >= 480 && latviaMinutes <= 950;
+    } else if (shift === 2) {
+        // 2nd shift: 16:00 (960 mins) to 23:50 (1430 mins)
+        return latviaMinutes >= 960 && latviaMinutes <= 1430;
+    } else if (shift === 3) {
+        // 3rd shift: 00:01 (1 min) to 07:50 (470 mins)
+        return latviaMinutes >= 1 && latviaMinutes <= 470;
+    }
+    
+    // Default to true if shift is unknown so we don't accidentally miss an alert
+    return true; 
+}
 
 // --- THE SWEEPER LOOP ---
 setInterval(() => {
@@ -37,23 +70,24 @@ setInterval(() => {
     
     for (const [instanceId, data] of Object.entries(deviceMemory)) {
         
+        // Production math (minutes -> milliseconds)
         const maxSilenceAllowed = data.timeoutLimit * 60000; 
         const timeSinceLastPing = currentTime - data.lastSeen;
 
-        if (timeSinceLastPing > maxSilenceAllowed && !data.alertSent) {
+        // 1. Check if it's over the limit
+        // 2. Check if we haven't sent an alert yet (The Lock)
+        // 3. Check if the current Latvian time is within their shift!
+        if (timeSinceLastPing > maxSilenceAllowed && !data.alertSent && isCurrentlyInShift(data.shift)) {
             
             console.log(`\n🚨 ALARM TRIGGERED FOR: ${instanceId} 🚨`);
             
-            // Lock the alert
+            // Lock the alert so it only sends once per failure
             deviceMemory[instanceId].alertSent = true;
 
-            // 2. The Telegram API Call
-            // Formats a clean message for your phone
-            const messageText = `🚨 MEDIA ALARM 🚨\n\nInstance: ${instanceId}\nShift: ${data.shift}\nStatus: OFFLINE / SILENT\nSilence Duration: ${Math.floor(timeSinceLastPing / 1000)}s`;
+            const messageText = `🚨 MEDIA ALARM 🚨\n\nInstance: ${instanceId}\nShift: ${data.shift}\nStatus: OFFLINE / SILENT\nSilence Duration: ${Math.floor(timeSinceLastPing / 60000)} minutes`;
             
             const telegramUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
             
-            // Fires the data to your specific chat ID
             axios.post(telegramUrl, {
                 chat_id: data.chatId,
                 text: messageText
@@ -64,7 +98,7 @@ setInterval(() => {
             });
         }
     }
-}, 5000); 
+}, 5000); // Scans the memory ledger every 5 seconds
 
 app.listen(PORT, () => {
     console.log(`Media Alarm Server is running on port ${PORT}`);
