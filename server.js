@@ -31,8 +31,8 @@ app.post('/ping', (req, res) => {
     res.status(200).send("Heartbeat logged successfully");
 });
 
-// --- SHIFT CHECKING LOGIC ---
-function isCurrentlyInShift(shiftNumber) {
+// --- SHIFT CHECKING LOGIC (With 10-Minute End-of-Shift Mute) ---
+function isEligibleForShiftAlert(shiftNumber) {
     // 1. Get current time in Latvia (Europe/Riga), handling DST automatically
     const options = {
         timeZone: 'Europe/Riga',
@@ -51,13 +51,16 @@ function isCurrentlyInShift(shiftNumber) {
     
     if (shift === 1) {
         // 1st shift: 08:00 (480 mins) to 15:50 (950 mins)
-        return latviaMinutes >= 480 && latviaMinutes <= 950;
+        // Alert window: 08:00 (480 mins) to 15:40 (940 mins) -> Last 10 mins muted
+        return latviaMinutes >= 480 && latviaMinutes <= 940;
     } else if (shift === 2) {
         // 2nd shift: 16:00 (960 mins) to 23:50 (1430 mins)
-        return latviaMinutes >= 960 && latviaMinutes <= 1430;
+        // Alert window: 16:00 (960 mins) to 23:40 (1420 mins) -> Last 10 mins muted
+        return latviaMinutes >= 960 && latviaMinutes <= 1420;
     } else if (shift === 3) {
         // 3rd shift: 00:01 (1 min) to 07:50 (470 mins)
-        return latviaMinutes >= 1 && latviaMinutes <= 470;
+        // Alert window: 00:01 (1 min) to 07:40 (460 mins) -> Last 10 mins muted
+        return latviaMinutes >= 1 && latviaMinutes <= 460;
     }
     
     // Default to true if shift is unknown so we don't accidentally miss an alert
@@ -76,8 +79,8 @@ setInterval(() => {
 
         // 1. Check if it's over the limit
         // 2. Check if we haven't sent an alert yet (The Lock)
-        // 3. Check if the current Latvian time is within their shift!
-        if (timeSinceLastPing > maxSilenceAllowed && !data.alertSent && isCurrentlyInShift(data.shift)) {
+        // 3. Check if we are inside the active alert window (ignoring last 10 mins of shift)
+        if (timeSinceLastPing > maxSilenceAllowed && !data.alertSent && isEligibleForShiftAlert(data.shift)) {
             
             console.log(`\n🚨 ALARM TRIGGERED FOR: ${instanceId} 🚨`);
             
