@@ -78,27 +78,36 @@ setInterval(() => {
         const timeSinceLastPing = currentTime - data.lastSeen;
 
         // 1. Check if it's over the limit
-        // 2. Check if we haven't sent an alert yet (The Lock)
-        // 3. Check if we are inside the active alert window (ignoring last 10 mins of shift)
-        if (timeSinceLastPing > maxSilenceAllowed && !data.alertSent && isEligibleForShiftAlert(data.shift)) {
+        // 2. Check if we haven't locked the alert yet
+        if (timeSinceLastPing > maxSilenceAllowed && !data.alertSent) {
             
-            console.log(`\n🚨 ALARM TRIGGERED FOR: ${instanceId} 🚨`);
-            
-            // Lock the alert so it only sends once per failure
-            deviceMemory[instanceId].alertSent = true;
+            // 3. Check if we are inside the active alert window
+            if (isEligibleForShiftAlert(data.shift)) {
+                
+                console.log(`\n🚨 ALARM TRIGGERED FOR: ${instanceId} 🚨`);
+                
+                // Lock the alert so it only sends once per failure
+                deviceMemory[instanceId].alertSent = true;
 
-            const messageText = `🚨 MEDIA ALARM 🚨\n\nInstance: ${instanceId}\nShift: ${data.shift}\nStatus: OFFLINE / SILENT\nSilence Duration: ${Math.floor(timeSinceLastPing / 60000)} minutes`;
-            
-            const telegramUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-            
-            axios.post(telegramUrl, {
-                chat_id: data.chatId,
-                text: messageText
-            }).then(() => {
-                console.log(`Alert successfully sent to Telegram chat: ${data.chatId}\n`);
-            }).catch((error) => {
-                console.error(`Failed to send Telegram alert:`, error.message);
-            });
+                const messageText = `🚨 MEDIA ALARM 🚨\n\nInstance: ${instanceId}\nShift: ${data.shift}\nStatus: OFFLINE / SILENT\nSilence Duration: ${Math.floor(timeSinceLastPing / 60000)} minutes`;
+                
+                const telegramUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+                
+                axios.post(telegramUrl, {
+                    chat_id: data.chatId,
+                    text: messageText
+                }).then(() => {
+                    console.log(`Alert successfully sent to Telegram chat: ${data.chatId}\n`);
+                }).catch((error) => {
+                    console.error(`Failed to send Telegram alert:`, error.message);
+                });
+
+            } else {
+                // SILENT MUTE: The instance died during the 10-minute end-of-shift window OR outside of shift hours.
+                // We silently lock the alert here so it doesn't spam the client when the next shift starts tomorrow morning!
+                deviceMemory[instanceId].alertSent = true;
+                console.log(`[SILENT MUTE] ${instanceId} died outside active alert window. Silently locked.`);
+            }
         }
     }
 }, 5000); // Scans the memory ledger every 5 seconds
