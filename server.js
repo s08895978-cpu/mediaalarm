@@ -10,6 +10,7 @@ const deviceMemory = {};
 // Using the Render environment variable for security
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
+// --- ROUTE 1: THE HEARTBEAT (Delays the silence alarm) ---
 app.post('/ping', (req, res) => {
     const { instance_id, chat_id, timeout_limit, shift, status } = req.body;
 
@@ -29,6 +30,33 @@ app.post('/ping', (req, res) => {
     };
 
     res.status(200).send("Heartbeat logged successfully");
+});
+
+// --- ROUTE 2: HUNTER MODE (Fires an instant custom alert) ---
+app.post('/popup-alert', (req, res) => {
+    const { instance_id, chat_id, status } = req.body;
+
+    if (!instance_id || !chat_id) {
+        return res.status(400).send("Missing parameters for Hunter Alert");
+    }
+
+    console.log(`[${new Date().toLocaleTimeString()}] ⚠️ HUNTER ALERT triggered by: ${instance_id}`);
+
+    // The custom, clearly distinguishable message Gatis requested
+    const messageText = `⚠️ HUNTER MODE ALERT ⚠️\n\nInstance: ${instance_id}\nIssue: Song Unavailable Popup Detected!\nAction Required: Please check this instance to identify the banned artist.`;
+    
+    const telegramUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    
+    axios.post(telegramUrl, {
+        chat_id: chat_id,
+        text: messageText
+    }).then(() => {
+        console.log(`Hunter Alert successfully sent to Telegram chat: ${chat_id}\n`);
+        res.status(200).send("Hunter Alert processed and sent");
+    }).catch((error) => {
+        console.error(`Failed to send Telegram Hunter alert:`, error.message);
+        res.status(500).send("Failed to send Hunter alert");
+    });
 });
 
 // --- SHIFT CHECKING LOGIC (With 10-Minute End-of-Shift Mute) ---
