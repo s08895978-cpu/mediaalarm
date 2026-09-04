@@ -10,7 +10,7 @@ const deviceMemory = {};
 // Using the Render environment variable for security
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// --- ROUTE 1: THE HEARTBEAT (Delays the silence alarm) ---
+// --- ROUTE 1: THE HEARTBEAT ---
 app.post('/ping', (req, res) => {
     const { instance_id, chat_id, timeout_limit, shift, status } = req.body;
 
@@ -18,21 +18,27 @@ app.post('/ping', (req, res) => {
         return res.status(400).send("Missing instance_id");
     }
 
-    console.log(`[${new Date().toLocaleTimeString()}] Heartbeat from: ${instance_id}`);
+    // If the instance was paused in Hunter Mode, a new heartbeat means playback resumed manually.
+    const wasPaused = deviceMemory[instance_id] && deviceMemory[instance_id].isHunterPaused;
+    if (wasPaused) {
+        console.log(`[RESTORED] ${instance_id} has resumed playing. Hunter pause lifted.`);
+    }
 
-    // Update the ledger with fresh data and reset the alarm lock
+    // Update the ledger with fresh data and clear all alert/pause flags
     deviceMemory[instance_id] = {
         chatId: chat_id,
         timeoutLimit: parseInt(timeout_limit), 
         shift: parseInt(shift),
         lastSeen: Date.now(),
-        alertSent: false // Automatically resets so it can fail/alert again later
+        alertSent: false, 
+        crashedAt: deviceMemory[instance_id] ? deviceMemory[instance_id].crashedAt : null,
+        isHunterPaused: false // Resets the pause flag on any normal heartbeat
     };
 
     res.status(200).send("Heartbeat logged successfully");
 });
 
-// --- ROUTE 2: HUNTER MODE (Fires an instant custom alert) ---
+// --- ROUTE 2: HUNTER MODE (Fires instant alert & Pauses Crash Logic) ---
 app.post('/popup-alert', (req, res) => {
     const { instance_id, chat_id, status } = req.body;
 
@@ -42,7 +48,11 @@ app.post('/popup-alert', (req, res) => {
 
     console.log(`[${new Date().toLocaleTimeString()}] ⚠️ HUNTER ALERT triggered by: ${instance_id}`);
 
-    // The custom, clearly distinguishable message Gatis requested
+    // Flag this instance so the Sweeper Loop and Recovery Script ignore it
+    if (deviceMemory[instance_id]) {
+        deviceMemory[instance_id].isHunterPaused = true;
+    }
+
     const messageText = `⚠️ HUNTER MODE ALERT ⚠️\n\nInstance: ${instance_id}\nIssue: Song Unavailable Popup Detected!\nAction Required: Please check this instance to identify the banned artist.`;
     
     const telegramUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -59,39 +69,51 @@ app.post('/popup-alert', (req, res) => {
     });
 });
 
+// --- ROUTE 3: RECOVERY STATUS (For the Python .exe Script) ---
+app.get('/api/recovery-status', (req, res) => {
+    const currentTime = Date.now();
+    const recoveryQueue = [];
+
+    for (const [instanceId, data] of Object.entries(deviceMemory)) {
+        // Only target instances that have crashed, are NOT in Hunter Mode, and have a crashed timestamp
+        if (data.alertSent && !data.isHunterPaused && data.crashedAt) {
+            const timeSinceCrash = currentTime - data.crashedAt;
+            
+            // 4 minutes = 240,000 milliseconds
+            if (timeSinceCrash >= 240000) {
+                recoveryQueue.push(instanceId);
+            }
+        }
+    }
+
+    res.status(200).json({ 
+        pending_recoveries: recoveryQueue 
+    });
+});
+
 // --- SHIFT CHECKING LOGIC (With 10-Minute End-of-Shift Mute) ---
 function isEligibleForShiftAlert(shiftNumber) {
-    // 1. Get current time in Latvia (Europe/Riga), handling DST automatically
     const options = {
         timeZone: 'Europe/Riga',
         hour: '2-digit',
         minute: '2-digit',
-        hour12: false // Force 24-hour format
+        hour12: false 
     };
     
-    // Returns format "HH:MM" based on current Latvian time
     const latviaTimeStr = new Date().toLocaleTimeString('en-GB', options); 
     const [hourStr, minStr] = latviaTimeStr.split(':');
     
-    // Convert current time to total minutes from midnight for easy math
     const latviaMinutes = (parseInt(hourStr, 10) * 60) + parseInt(minStr, 10);
     const shift = parseInt(shiftNumber, 10);
     
     if (shift === 1) {
-        // 1st shift: 08:00 (480 mins) to 15:50 (950 mins)
-        // Alert window: 08:00 (480 mins) to 15:40 (940 mins) -> Last 10 mins muted
         return latviaMinutes >= 480 && latviaMinutes <= 940;
     } else if (shift === 2) {
-        // 2nd shift: 16:00 (960 mins) to 23:50 (1430 mins)
-        // Alert window: 16:00 (960 mins) to 23:40 (1420 mins) -> Last 10 mins muted
         return latviaMinutes >= 960 && latviaMinutes <= 1420;
     } else if (shift === 3) {
-        // 3rd shift: 00:01 (1 min) to 07:50 (470 mins)
-        // Alert window: 00:01 (1 min) to 07:40 (460 mins) -> Last 10 mins muted
         return latviaMinutes >= 1 && latviaMinutes <= 460;
     }
     
-    // Default to true if shift is unknown so we don't accidentally miss an alert
     return true; 
 }
 
@@ -101,12 +123,13 @@ setInterval(() => {
     
     for (const [instanceId, data] of Object.entries(deviceMemory)) {
         
-        // Production math (minutes -> milliseconds)
+        // 1. Skip this instance entirely if it is waiting for Gatis on a popup
+        if (data.isHunterPaused) continue;
+
         const maxSilenceAllowed = data.timeoutLimit * 60000; 
         const timeSinceLastPing = currentTime - data.lastSeen;
 
-        // 1. Check if it's over the limit
-        // 2. Check if we haven't locked the alert yet
+        // 2. Check if it's over the limit and we haven't locked the alert yet
         if (timeSinceLastPing > maxSilenceAllowed && !data.alertSent) {
             
             // 3. Check if we are inside the active alert window
@@ -114,8 +137,9 @@ setInterval(() => {
                 
                 console.log(`\n🚨 ALARM TRIGGERED FOR: ${instanceId} 🚨`);
                 
-                // Lock the alert so it only sends once per failure
+                // Lock the alert and log the crash time for the 4-minute grace period
                 deviceMemory[instanceId].alertSent = true;
+                deviceMemory[instanceId].crashedAt = currentTime; 
 
                 const messageText = `🚨 MEDIA ALARM 🚨\n\nInstance: ${instanceId}\nShift: ${data.shift}\nStatus: OFFLINE / SILENT\nSilence Duration: ${Math.floor(timeSinceLastPing / 60000)} minutes`;
                 
@@ -125,20 +149,20 @@ setInterval(() => {
                     chat_id: data.chatId,
                     text: messageText
                 }).then(() => {
-                    console.log(`Alert successfully sent to Telegram chat: ${data.chatId}\n`);
+                    console.log(`Alert sent to Telegram chat. 4-minute recovery window started.\n`);
                 }).catch((error) => {
                     console.error(`Failed to send Telegram alert:`, error.message);
                 });
 
             } else {
-                // SILENT MUTE: The instance died during the 10-minute end-of-shift window OR outside of shift hours.
-                // We silently lock the alert here so it doesn't spam the client when the next shift starts tomorrow morning!
+                // SILENT MUTE: Still lock it and track crash time, but don't message Telegram
                 deviceMemory[instanceId].alertSent = true;
-                console.log(`[SILENT MUTE] ${instanceId} died outside active alert window. Silently locked.`);
+                deviceMemory[instanceId].crashedAt = currentTime; 
+                console.log(`[SILENT MUTE] ${instanceId} died outside active alert window. Tracked for silent recovery.`);
             }
         }
     }
-}, 5000); // Scans the memory ledger every 5 seconds
+}, 5000); 
 
 app.listen(PORT, () => {
     console.log(`Media Alarm Server is running on port ${PORT}`);
