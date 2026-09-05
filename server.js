@@ -79,9 +79,13 @@ app.get('/api/recovery-status', (req, res) => {
         if (data.alertSent && !data.isHunterPaused && data.crashedAt) {
             const timeSinceCrash = currentTime - data.crashedAt;
             
-            // 4 minutes = 240,000 milliseconds
-            if (timeSinceCrash >= 240000) {
+            // Add to queue IF dead for at least 4 mins (240,000ms), BUT less than 15 mins (900,000ms).
+            if (timeSinceCrash >= 240000 && timeSinceCrash <= 900000) {
                 recoveryQueue.push(instanceId);
+            } else if (timeSinceCrash > 900000) {
+                // TTL Expiry: It has been dead for over 15 minutes. Drop it permanently.
+                data.crashedAt = null;
+                console.log(`[QUEUE EXPIRY] ${instanceId} offline > 15m. Dropped from recovery queue.`);
             }
         }
     }
@@ -155,10 +159,10 @@ setInterval(() => {
                 });
 
             } else {
-                // SILENT MUTE: Still lock it and track crash time, but don't message Telegram
+                // SILENT MUTE: Lock alert to stop spam, but DO NOT log a crash time.
                 deviceMemory[instanceId].alertSent = true;
-                deviceMemory[instanceId].crashedAt = currentTime; 
-                console.log(`[SILENT MUTE] ${instanceId} died outside active alert window. Tracked for silent recovery.`);
+                deviceMemory[instanceId].crashedAt = null; 
+                console.log(`[SILENT MUTE] ${instanceId} closed outside active shift. Ignored by recovery bot.`);
             }
         }
     }
